@@ -169,11 +169,16 @@ void ikcp_allocator(void* (*new_malloc)(size_t), void (*new_free)(void*))
 // allocate a new kcp segment
 static IKCPSEG* ikcp_segment_new(ikcpcb* kcp, int size)
 {
+    (void)kcp;
     return (IKCPSEG*)ikcp_malloc(sizeof(IKCPSEG) + size);
 }
 
 // delete a segment
-static void ikcp_segment_delete(ikcpcb* kcp, IKCPSEG* seg) { ikcp_free(seg); }
+static void ikcp_segment_delete(ikcpcb* kcp, IKCPSEG* seg)
+{
+    (void)kcp;
+    ikcp_free(seg);
+}
 
 // write log
 void ikcp_log(ikcpcb* kcp, int mask, const char* fmt, ...)
@@ -221,6 +226,9 @@ void ikcp_qprint(const char* name, const struct IQUEUEHEAD* head)
 		if (p->next != head) printf(",");
 	}
 	printf("]\n");
+#else
+    (void)name;
+    (void)head;
 #endif
 }
 
@@ -557,12 +565,13 @@ static void ikcp_update_ack(ikcpcb* kcp, IINT32 rtt)
         long delta = rtt - kcp->rx_srtt;
         if (delta < 0)
             delta = -delta;
-        kcp->rx_rttval = (3 * kcp->rx_rttval + delta) / 4;
-        kcp->rx_srtt   = (7 * kcp->rx_srtt + rtt) / 8;
+        kcp->rx_rttval = (3 * (IINT64)kcp->rx_rttval + delta) / 4;
+        kcp->rx_srtt   = (7 * (IINT64)kcp->rx_srtt + rtt) / 8;
         if (kcp->rx_srtt < 1)
             kcp->rx_srtt = 1;
     }
-    rto         = kcp->rx_srtt + _imax_(kcp->interval, 4 * kcp->rx_rttval);
+    rto = kcp->rx_srtt +
+          _imax_(kcp->interval, (IINT32)(4 * (IINT64)kcp->rx_rttval));
     kcp->rx_rto = _ibound_(kcp->rx_minrto, rto, IKCP_RTO_MAX);
 }
 
@@ -617,6 +626,7 @@ static void ikcp_parse_una(ikcpcb* kcp, IUINT32 una)
 
 static void ikcp_parse_fastack(ikcpcb* kcp, IUINT32 sn, IUINT32 ts)
 {
+    (void)ts;
     struct IQUEUEHEAD *p, *next;
 
     if (_itimediff(sn, kcp->snd_una) < 0 || _itimediff(sn, kcp->snd_nxt) >= 0)

@@ -13,7 +13,7 @@
 #define panic(...)   abort()
 #endif
 
-#ifndef DEBUG_LOGGING
+#ifdef DEBUG_LOGGING
 #define debug(...) _debug(__VA_ARGS__)
 #else
 #define debug(...) (void)0
