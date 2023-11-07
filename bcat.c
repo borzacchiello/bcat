@@ -11,7 +11,7 @@ int main(int argc, char const* argv[])
         listen = 1;
 
     btran_ctx_t ctx;
-    btran_init(&ctx, BTRAN_TCP, "la pampuglia e' fiuda all'ebba");
+    btran_init(&ctx, BTRAN_UDP, "la pampuglia e' fiuda all'ebba");
     if (listen) {
         if (btran_listen(&ctx, "127.0.0.1", 1337) != 0) {
             printf("[!] listen failed\n");

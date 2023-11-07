@@ -8,21 +8,17 @@
 #include "alloc.h"
 #include "log.h"
 #include "tcp.h"
+#include "udp.h"
 
 #define AUTH_TIMEOUT 3
 
 static int recv_uint32_t(btran_ctx_t* ctx, uint32_t* data, uint32_t timeout);
 static int send_uint32_t(btran_ctx_t* ctx, uint32_t data);
 
-static void fill_with_random(uint8_t* buffer, uint32_t size, int flags)
+static void fill_with_random(uint8_t* buffer, uint32_t size)
 {
-    uint32_t num_gen = 0;
-    while (num_gen != size) {
-        ssize_t n = getrandom(buffer + num_gen, size - num_gen, flags);
-        if (n < 0)
-            panic("getrandom failed");
-        num_gen += n;
-    }
+    if (getentropy(buffer, size) != 0)
+        panic("unable to generate random data");
 }
 
 __attribute__((unused)) static char nibble_to_hex(uint8_t v)
@@ -53,8 +49,8 @@ int btran_init(btran_ctx_t* ctx, btran_backend_t type, const char* key)
             tcp_backend_init(ctx);
             break;
         case BTRAN_UDP:
-            error("UDP unimplemented");
-            return 1;
+            udp_backend_init(ctx);
+            break;
         case BTRAN_ICMP:
             error("ICMP unimplemented");
             return 1;
@@ -83,7 +79,7 @@ static int exchange_key(btran_ctx_t* ctx)
 {
     uint8_t new_key[32];
     uint8_t new_key_enc[32];
-    fill_with_random(new_key, sizeof(new_key), 0);
+    fill_with_random(new_key, sizeof(new_key));
     memcpy(new_key_enc, new_key, sizeof(new_key_enc));
 
     if (btran_send(ctx, new_key_enc, sizeof(new_key_enc)) != 0)
@@ -113,7 +109,7 @@ static int let_exchange_key(btran_ctx_t* ctx)
 static int authenticate(btran_ctx_t* ctx, uint32_t* rand)
 {
     uint32_t auth_rand, auth_rand_resp = 0;
-    fill_with_random((uint8_t*)&auth_rand, sizeof(auth_rand), 0);
+    fill_with_random((uint8_t*)&auth_rand, sizeof(auth_rand));
 
     debug("authenticate: sending auth token: 0x%08x", auth_rand);
     if (send_uint32_t(ctx, auth_rand) != 0)
@@ -299,7 +295,7 @@ static int send_uint32_t(btran_ctx_t* ctx, uint32_t data)
 int btran_send(btran_ctx_t* ctx, uint8_t* buf, uint32_t size)
 {
     uint8_t nonce[8];
-    fill_with_random(nonce, sizeof(nonce), GRND_RANDOM);
+    fill_with_random(nonce, sizeof(nonce));
     if (send_all(ctx, nonce, sizeof(nonce)) != 0)
         return 1;
 

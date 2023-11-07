@@ -77,6 +77,9 @@ static int tcp_listen(btran_ctx_t* ctx, const char* addr, int port)
         return r;
     }
 
+    int option = 1;
+    setsockopt(tb->fd, SOL_SOCKET, SO_REUSEADDR, &option, sizeof(option));
+
     struct sockaddr_in sockaddr;
     sockaddr.sin_family = AF_INET;
     sockaddr.sin_port   = htons(port);

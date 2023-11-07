@@ -12,7 +12,8 @@ set(src
     icmp.c
     tcp.c
     udp.c
-    reliable_stream.c
+    ikcp.c
+    ll.c
     salsa20.c
     sha256.c
     alloc.c
