@@ -5,9 +5,10 @@
 #include <stdlib.h>
 
 typedef enum btran_backend_t {
-    BTRAN_TCP  = 1,
-    BTRAN_UDP  = 2,
-    BTRAN_ICMP = 3,
+    BTRAN_INVALID = 0,
+    BTRAN_TCP     = 1,
+    BTRAN_UDP     = 2,
+    BTRAN_ICMP    = 3,
 } btran_backend_t;
 
 struct btran_ctx_t;
