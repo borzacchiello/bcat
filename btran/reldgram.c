@@ -41,6 +41,7 @@
 #define TY_SERVER_LISTENER 1
 #define TY_SERVER_PEER     2
 #define TY_CLIENT_PEER     3
+#define TY_DISCONNECTED    4
 
 static const uint8_t pkt_conn[]     = {PKT_CONN};
 static const uint8_t pkt_conn_ack[] = {PKT_CONN_ACK};
@@ -170,23 +171,26 @@ void reldgram_disconnect(reldgram_t* rd)
     for (size_t i = 0; i < rd->conns_size; ++i) {
         // send a RST packet to the peer
         rd->sendto(rd->obj, &rd->conns[i]->peer, pkt_rst, sizeof(pkt_rst));
-        del_connection(rd->conns[i]);
+        rd->conns[i]->connected = 0;
     }
-    btran_free(rd->conns);
-
-    if (rd->pending)
-        queue_destroy(rd->pending, &free);
-
-    rd->type           = TY_UNINITIALIZED;
-    rd->pending        = NULL;
-    rd->conns          = NULL;
-    rd->conns_size     = 0;
-    rd->conns_capacity = 0;
+    rd->type = TY_DISCONNECTED;
 }
 
 void reldgram_destroy(reldgram_t* rd)
 {
     reldgram_disconnect(rd);
+
+    for (size_t i = 0; i < rd->conns_size; ++i)
+        del_connection(rd->conns[i]);
+    btran_free(rd->conns);
+
+    if (rd->pending)
+        queue_destroy(rd->pending, &free);
+
+    rd->pending        = NULL;
+    rd->conns          = NULL;
+    rd->conns_size     = 0;
+    rd->conns_capacity = 0;
 
     pthread_mutex_destroy(&rd->conns_lock);
     pthread_mutex_destroy(&rd->pending_lock);
@@ -659,6 +663,7 @@ int reldgram_connect(reldgram_t* rd, struct sockaddr_in* addr)
             break;
     }
     if (!rd->conns[0]->connected) {
+        rd->conns[0]->n_owners = 1;
         reldgram_disconnect(rd);
         return ERR_PEER_OFFLINE;
     }
