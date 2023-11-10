@@ -102,9 +102,19 @@ static connection_t* mk_connection(struct sockaddr_in* peer, size_t queue_size)
 
 static void del_connection(connection_t* conn)
 {
-    queue_destroy(conn->msg_queue, (void (*)(void*)) & del_msg);
-    pthread_mutex_destroy(&conn->conn_lock);
-    btran_free(conn);
+    // connection is a shared pointer between the recv thread and the user
+    // we need to check the if there are other owners before actually deleting
+    RUN_OR_FAIL(pthread_mutex_lock(&conn->conn_lock));
+    conn->n_owners -= 1;
+    conn->connected = 0;
+    if (conn->n_owners == 0) {
+        RUN_OR_FAIL(pthread_mutex_unlock(&conn->conn_lock));
+        queue_destroy(conn->msg_queue, (void (*)(void*)) & del_msg);
+        pthread_mutex_destroy(&conn->conn_lock);
+        btran_free(conn);
+        return;
+    }
+    RUN_OR_FAIL(pthread_mutex_unlock(&conn->conn_lock));
 }
 
 static void msleep(int msec) { usleep(msec * 1000); }
@@ -160,20 +170,7 @@ void reldgram_disconnect(reldgram_t* rd)
     for (size_t i = 0; i < rd->conns_size; ++i) {
         // send a RST packet to the peer
         rd->sendto(rd->obj, &rd->conns[i]->peer, pkt_rst, sizeof(pkt_rst));
-        if (rd->type != TY_SERVER_PEER)
-            del_connection(rd->conns[i]);
-        else {
-            // the connection of a server peer is shared with the listen thread,
-            // we need to check whether the thread is using it
-            RUN_OR_FAIL(pthread_mutex_lock(&rd->conns[i]->conn_lock));
-            rd->conns[i]->connected = 0;
-            rd->conns[i]->n_owners -= 1;
-            if (rd->conns[i]->n_owners == 0) {
-                RUN_OR_FAIL(pthread_mutex_unlock(&rd->conns[i]->conn_lock));
-                del_connection(rd->conns[i]);
-            } else
-                RUN_OR_FAIL(pthread_mutex_unlock(&rd->conns[i]->conn_lock));
-        }
+        del_connection(rd->conns[i]);
     }
     btran_free(rd->conns);
 
@@ -217,14 +214,7 @@ static void* thread_listen(void* _rd)
                     curtime - rd->conns[i]->last_alive >=
                         3 * ALIVE_SEC_THRESHOLD) {
                     connection_t* conn = rd->conns[i];
-                    RUN_OR_FAIL(pthread_mutex_lock(&conn->conn_lock));
-                    conn->connected = 0;
-                    conn->n_owners -= 1;
-                    if (conn->n_owners == 0) {
-                        RUN_OR_FAIL(pthread_mutex_unlock(&conn->conn_lock));
-                        del_connection(conn);
-                    } else
-                        RUN_OR_FAIL(pthread_mutex_unlock(&conn->conn_lock));
+                    del_connection(conn);
                     if (i < rd->conns_size - 1)
                         rd->conns[i] = rd->conns[rd->conns_size - 1];
                     rd->conns_size -= 1;
@@ -418,16 +408,7 @@ static void* thread_listen(void* _rd)
                             addr.sin_addr.s_addr &&
                         rd->conns[i]->peer.sin_port == addr.sin_port) {
                         connection_t* conn = rd->conns[i];
-
-                        RUN_OR_FAIL(pthread_mutex_lock(&conn->conn_lock));
-                        conn->connected = 0;
-                        conn->n_owners -= 1;
-                        if (conn->n_owners == 0) {
-                            RUN_OR_FAIL(pthread_mutex_unlock(&conn->conn_lock));
-                            del_connection(conn);
-                        } else
-                            RUN_OR_FAIL(pthread_mutex_unlock(&conn->conn_lock));
-
+                        del_connection(conn);
                         if (i < rd->conns_size - 1)
                             rd->conns[i] = rd->conns[rd->conns_size - 1];
                         rd->conns_size -= 1;
@@ -459,6 +440,8 @@ static void* thread_client_peer(void* _rd)
             if (curtime - rd->conns[0]->last_alive >= 3 * ALIVE_SEC_THRESHOLD) {
                 // no data for too long, silently disconnect
                 rd->conns[0]->connected = 0;
+                rd->thread_running      = 0;
+                break;
             } else if (curtime - rd->conns[0]->last_alive >=
                        ALIVE_SEC_THRESHOLD) {
                 // no data for a while, let's ping the peer
@@ -581,7 +564,8 @@ static void* thread_client_peer(void* _rd)
                 if (conn->connected &&
                     conn->peer.sin_addr.s_addr == addr.sin_addr.s_addr &&
                     conn->peer.sin_port == addr.sin_port) {
-                    conn->connected = 0;
+                    conn->connected    = 0;
+                    rd->thread_running = 0;
                 }
                 break;
             }
@@ -590,6 +574,9 @@ static void* thread_client_peer(void* _rd)
                 break;
         }
     }
+
+    rd->conns[0]->connected = 0;
+    del_connection(rd->conns[0]);
     return NULL;
 }
 
@@ -654,17 +641,17 @@ int reldgram_connect(reldgram_t* rd, struct sockaddr_in* addr)
     if (rd->type != TY_UNINITIALIZED)
         return ERR_WRONG_TYPE;
 
-    rd->type           = TY_CLIENT_PEER;
-    rd->conns          = btran_malloc(sizeof(connection_t*));
-    rd->conns_size     = 1;
-    rd->conns_capacity = 1;
-    rd->thread_running = 1;
-    rd->conns[0]       = mk_connection(addr, MSG_QUEUE_CAPACITY);
+    rd->type               = TY_CLIENT_PEER;
+    rd->conns              = btran_malloc(sizeof(connection_t*));
+    rd->conns_size         = 1;
+    rd->conns_capacity     = 1;
+    rd->thread_running     = 1;
+    rd->conns[0]           = mk_connection(addr, MSG_QUEUE_CAPACITY);
+    rd->conns[0]->n_owners = 2;
     if (pthread_create(&rd->thread, NULL, &thread_client_peer, rd) != 0)
         return ERR_PTHREAD_CREATE_FAILED;
 
     rd->conns[0]->connected = 0;
-    rd->conns[0]->n_owners  = 1;
     for (int i = 0; i < MAX_CONN_RETRY; ++i) {
         rd->sendto(rd->obj, addr, pkt_conn, sizeof(pkt_conn));
         msleep(CONN_RETRY_SLEEP_TIME);
@@ -753,8 +740,7 @@ int reldgram_recv(reldgram_t* rd, uint8_t** data, uint32_t* data_size)
     connection_t* conn = rd->conns[0];
     while (1) {
         if (!conn->connected) {
-            if (rd->type == TY_CLIENT_PEER)
-                reldgram_disconnect(rd);
+            reldgram_disconnect(rd);
             return ERR_PEER_OFFLINE;
         }
         RUN_OR_FAIL(pthread_mutex_lock(&conn->conn_lock));

@@ -78,6 +78,7 @@ static void*       print_from_network_loop(void* _ctx)
         size_t nwrote = 0;
         while (nwrote != size)
             nwrote += fwrite(buf + nwrote, 1, size - nwrote, stdout);
+        free(buf);
     }
 
     thread_completed = 1;
