@@ -18,7 +18,8 @@
 #define ERR_BUFFER_TOO_LONG       -5
 
 typedef struct connection_t {
-    atomic_int n_owners;
+    pthread_mutex_t conn_lock;
+    int             n_owners;
 
     void* obj;
     int   (*sendto)(void* obj, struct sockaddr_in* addr, const uint8_t* data,

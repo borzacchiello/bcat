@@ -63,14 +63,15 @@ static int ikcp_out(const char* buf, int len, ikcpcb* kcp, void* user)
 static connection_t* mk_connection(struct sockaddr_in* peer, reldgram_t* rd)
 {
     connection_t* conn = btran_malloc(sizeof(connection_t));
-    conn->connected    = 1;
-    conn->n_owners     = 0;
-    conn->obj          = rd->obj;
-    conn->sendto       = rd->sendto;
-    conn->recvfrom     = rd->recvfrom;
-    conn->peer         = *peer;
-    conn->last_alive   = time(0);
-    conn->ikcp         = ikcp_create(1337, conn);
+    pthread_mutex_init(&conn->conn_lock, NULL);
+    conn->connected  = 1;
+    conn->n_owners   = 0;
+    conn->obj        = rd->obj;
+    conn->sendto     = rd->sendto;
+    conn->recvfrom   = rd->recvfrom;
+    conn->peer       = *peer;
+    conn->last_alive = time(0);
+    conn->ikcp       = ikcp_create(1337, conn);
     ikcp_setmtu(conn->ikcp, rd->max_pkt_size);
     ikcp_setoutput(conn->ikcp, ikcp_out);
     return conn;
@@ -80,13 +81,18 @@ static void del_connection(connection_t* conn)
 {
     // connection is a shared pointer between the recv thread and the user
     // we need to check the if there are other owners before actually deleting
-    conn->n_owners -= 1;
+    RUN_OR_FAIL(pthread_mutex_lock(&conn->conn_lock));
     conn->connected = 0;
-    if (conn->n_owners <= 0) {
-        ikcp_flush(conn->ikcp);
+    conn->n_owners -= 1;
+    if (conn->n_owners < 0)
+        panic("del_connection(): n_owners < 0");
+    if (conn->n_owners == 0) {
+        RUN_OR_FAIL(pthread_mutex_unlock(&conn->conn_lock));
         ikcp_release(conn->ikcp);
+        pthread_mutex_destroy(&conn->conn_lock);
         btran_free(conn);
-    }
+    } else
+        RUN_OR_FAIL(pthread_mutex_unlock(&conn->conn_lock));
 }
 
 static time_t time_ms()
@@ -143,16 +149,24 @@ reldgram_t* reldgram_init(void* obj,
 
 void reldgram_disconnect(reldgram_t* rd)
 {
+    RUN_OR_FAIL(pthread_mutex_lock(&rd->conns_lock));
     for (size_t i = 0; i < rd->conns_size; ++i) {
         // send a RST packet to the peer
         if (rd->conns[i]->connected) {
+            RUN_OR_FAIL(pthread_mutex_lock(&rd->conns[i]->conn_lock));
             ikcp_flush(rd->conns[i]->ikcp);
-            while (ikcp_waitsnd(rd->conns[i]->ikcp) > 0)
+            while (1) {
+                int numpkt = ikcp_waitsnd(rd->conns[i]->ikcp);
+                RUN_OR_FAIL(pthread_mutex_unlock(&rd->conns[i]->conn_lock));
+                if (numpkt <= 0)
+                    break;
                 msleep(10);
+            }
             rd->sendto(rd->obj, &rd->conns[i]->peer, pkt_rst, sizeof(pkt_rst));
             rd->conns[i]->connected = 0;
         }
     }
+    RUN_OR_FAIL(pthread_mutex_unlock(&rd->conns_lock));
 
     if (rd->thread_running) {
         rd->thread_running = 0;
@@ -196,8 +210,11 @@ static void* thread_listen(void* _rd)
         RUN_OR_FAIL(pthread_mutex_lock(&rd->conns_lock));
         time_t currtime = time_ms();
         for (size_t i = 0; i < rd->conns_size; ++i)
-            if (rd->conns[i]->connected)
+            if (rd->conns[i]->connected) {
+                RUN_OR_FAIL(pthread_mutex_lock(&rd->conns[i]->conn_lock));
                 ikcp_update(rd->conns[i]->ikcp, currtime);
+                RUN_OR_FAIL(pthread_mutex_unlock(&rd->conns[i]->conn_lock));
+            }
         RUN_OR_FAIL(pthread_mutex_unlock(&rd->conns_lock));
 
         if (n <= 0) {
@@ -308,8 +325,10 @@ static void* thread_listen(void* _rd)
                         debug("thread_listen(): data dispatched [len: %d]",
                               n - 1);
                         connection_t* conn = rd->conns[i];
-                        conn->last_alive   = time(0);
+                        RUN_OR_FAIL(pthread_mutex_lock(&conn->conn_lock));
+                        conn->last_alive = time(0);
                         ikcp_input(conn->ikcp, (const char*)(tmp + 1), n - 1);
+                        RUN_OR_FAIL(pthread_mutex_unlock(&conn->conn_lock));
                         break;
                     }
                 RUN_OR_FAIL(pthread_mutex_unlock(&rd->conns_lock));
@@ -395,7 +414,9 @@ static void* thread_client_peer(void* _rd)
             rd->recvfrom(rd->obj, &addr, tmp, sizeof(tmp), RECV_POLL_TIMEOUT);
         if (rd->conns[0]->connected) {
             time_t currtime = time_ms();
+            RUN_OR_FAIL(pthread_mutex_lock(&rd->conns[0]->conn_lock));
             ikcp_update(rd->conns[0]->ikcp, currtime);
+            RUN_OR_FAIL(pthread_mutex_unlock(&rd->conns[0]->conn_lock));
         }
         if (n <= 0) {
             time_t curtime = time(0);
@@ -443,8 +464,10 @@ static void* thread_client_peer(void* _rd)
                     conn->peer.sin_port == addr.sin_port) {
                     debug("thread_client_peer(): data dispatched [len: %d]",
                           n - 1);
+                    RUN_OR_FAIL(pthread_mutex_lock(&conn->conn_lock));
                     conn->last_alive = time(0);
                     ikcp_input(conn->ikcp, (const char*)(tmp + 1), n - 1);
+                    RUN_OR_FAIL(pthread_mutex_unlock(&conn->conn_lock));
                 }
                 break;
             }
@@ -582,8 +605,9 @@ int reldgram_connect(reldgram_t* rd, struct sockaddr_in* addr)
             break;
     }
     if (!rd->conns[0]->connected) {
-        rd->conns[0]->n_owners = 1;
         reldgram_disconnect(rd);
+        del_connection(rd->conns[0]);
+        rd->conns_size = 0;
         return ERR_PEER_OFFLINE;
     }
     return NO_ERR;
@@ -602,7 +626,9 @@ int reldgram_send(reldgram_t* rd, const uint8_t* data, uint32_t data_size)
         return ERR_PEER_OFFLINE;
     }
 
+    RUN_OR_FAIL(pthread_mutex_lock(&conn->conn_lock));
     ikcp_send(conn->ikcp, (const char*)data, (int)data_size);
+    RUN_OR_FAIL(pthread_mutex_unlock(&conn->conn_lock));
     return NO_ERR;
 }
 
@@ -618,7 +644,10 @@ int reldgram_recv(reldgram_t* rd, uint8_t* data, uint32_t data_size,
     connection_t* conn = rd->conns[0];
     int           r    = -1;
     while (conn->connected && r < 0) {
-        if ((r = ikcp_recv(conn->ikcp, (char*)data, (int)data_size)) < 0)
+        RUN_OR_FAIL(pthread_mutex_lock(&conn->conn_lock));
+        r = ikcp_recv(conn->ikcp, (char*)data, (int)data_size);
+        RUN_OR_FAIL(pthread_mutex_unlock(&conn->conn_lock));
+        if (r < 0)
             msleep(10);
     }
     if (!conn->connected) {
