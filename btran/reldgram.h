@@ -8,24 +8,29 @@
 #include <time.h>
 
 #include "queue.h"
+#include "ikcp.h"
 
 #define NO_ERR                    0
 #define ERR_WRONG_TYPE            -1
 #define ERR_PTHREAD_CREATE_FAILED -2
 #define ERR_PEER_OFFLINE          -3
 #define ERR_TOO_MANY_RETRY        -4
+#define ERR_BUFFER_TOO_LONG       -5
 
 typedef struct connection_t {
+    atomic_int n_owners;
+
+    void* obj;
+    int   (*sendto)(void* obj, struct sockaddr_in* addr, const uint8_t* data,
+                  uint32_t data_size);
+    int   (*recvfrom)(void* obj, struct sockaddr_in* addr, uint8_t* data,
+                    uint32_t data_size, uint32_t timeout);
+
     atomic_bool connected;
     time_t      last_alive;
 
-    pthread_mutex_t conn_lock;
-    int             n_owners;
-
-    atomic_uint_fast32_t recv_id;
-    atomic_uint_fast32_t send_id;
-    struct sockaddr_in   peer;
-    queue_t*             msg_queue;
+    ikcpcb*            ikcp;
+    struct sockaddr_in peer;
 } connection_t;
 
 typedef struct reldgram_t {
@@ -34,6 +39,7 @@ typedef struct reldgram_t {
                   uint32_t data_size);
     int   (*recvfrom)(void* obj, struct sockaddr_in* addr, uint8_t* data,
                     uint32_t data_size, uint32_t timeout);
+    int   max_pkt_size;
 
     int         type;
     atomic_bool thread_running;
@@ -46,7 +52,6 @@ typedef struct reldgram_t {
     size_t          conns_capacity;
     size_t          conns_size;
     pthread_mutex_t conns_lock;
-
 } reldgram_t;
 
 const char* reldgram_strerror(int errnum);
@@ -66,7 +71,8 @@ reldgram_t* reldgram_accept(reldgram_t* rd);
 int         reldgram_connect(reldgram_t* rd, struct sockaddr_in* addr);
 
 int reldgram_send(reldgram_t* rd, const uint8_t* data, uint32_t data_size);
-int reldgram_recv(reldgram_t* rd, uint8_t** data, uint32_t* data_size);
+int reldgram_recv(reldgram_t* rd, uint8_t* data, uint32_t data_size,
+                  uint32_t* nread);
 
 int reldgram_get_peer_info(reldgram_t* rd, char** addr, int* port);
 

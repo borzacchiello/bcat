@@ -1,4 +1,5 @@
 #include <arpa/inet.h>
+#include <sys/time.h>
 #include <string.h>
 #include <unistd.h>
 #include <stdio.h>
@@ -13,29 +14,19 @@
     if (runnable != 0)                                                         \
         abort();
 
-#define VERBOSE_SEND 0
-
-#define RELDGRAM_MAX_PKT_SIZE 400
-#define CONCURRENT_SEND       32
-
 #define MAX_CONN_RETRY        10
-#define SEND_RETRY_SLEEP_TIME 100
-#define MAX_SEND_RETRY        16
 #define CONN_RETRY_SLEEP_TIME 100
-#define RECV_POLL_TIMEOUT     1
-#define CONN_TIMEOUT          2
+#define RECV_POLL_TIMEOUT     10
 #define ALIVE_SEC_THRESHOLD   10
 
 #define PENDING_CONN_CAPACITY 10
-#define MSG_QUEUE_CAPACITY    256
 
 #define PKT_CONN     ((uint8_t)0)
 #define PKT_CONN_ACK ((uint8_t)1)
 #define PKT_DATA     ((uint8_t)2)
-#define PKT_DATA_ACK ((uint8_t)3)
-#define PKT_RST      ((uint8_t)4)
-#define PKT_PING     ((uint8_t)5)
-#define PKT_PING_ACK ((uint8_t)6)
+#define PKT_RST      ((uint8_t)3)
+#define PKT_PING     ((uint8_t)4)
+#define PKT_PING_ACK ((uint8_t)5)
 
 #define TY_UNINITIALIZED   0
 #define TY_SERVER_LISTENER 1
@@ -49,55 +40,39 @@ static const uint8_t pkt_rst[]      = {PKT_RST};
 static const uint8_t pkt_ping[]     = {PKT_PING};
 static const uint8_t pkt_ping_ack[] = {PKT_PING_ACK};
 
-static void mk_pkt_data_ack(uint32_t id, uint8_t pkt[5])
+static int ikcp_out(const char* buf, int len, ikcpcb* kcp, void* user)
 {
-    pkt[0]                = PKT_DATA_ACK;
-    uint32_t id_netendian = htonl(id);
-    memcpy(pkt + 1, (uint8_t*)&id_netendian, sizeof(uint32_t));
+    (void)kcp;
+
+    if (len < 0)
+        panic("ikcp_out(): unexpected len (%d)", len);
+
+    debug("ikcp_out(): sending data [len: %d]", len);
+    connection_t* conn = (connection_t*)user;
+
+    uint8_t* pkt = btran_malloc(len + 1);
+    memcpy(pkt + 1, buf, len);
+    pkt[0] = PKT_DATA;
+
+    int r = conn->sendto(conn->obj, &conn->peer, (const uint8_t*)pkt,
+                         (uint32_t)(len + 1));
+    btran_free(pkt);
+    return r;
 }
 
-static void mk_pkt_data(uint32_t id, const uint8_t* data, uint32_t data_size,
-                        uint8_t pkt[RELDGRAM_MAX_PKT_SIZE + 5])
-{
-    if (data_size > RELDGRAM_MAX_PKT_SIZE)
-        abort();
-
-    pkt[0]                = PKT_DATA;
-    uint32_t id_netendian = htonl(id);
-    memcpy(pkt + 1, (uint8_t*)&id_netendian, sizeof(uint32_t));
-    memcpy(pkt + 5, data, data_size);
-}
-
-typedef struct msg_t {
-    uint8_t* data;
-    uint32_t size;
-} msg_t;
-
-static msg_t* mk_msg(uint8_t* data, uint32_t size)
-{
-    msg_t* msg = btran_malloc(sizeof(msg_t));
-    msg->data  = btran_malloc(size);
-    msg->size  = size;
-    memcpy(msg->data, data, size);
-    return msg;
-}
-
-static void del_msg(msg_t* msg)
-{
-    btran_free(msg->data);
-    btran_free(msg);
-}
-
-static connection_t* mk_connection(struct sockaddr_in* peer, size_t queue_size)
+static connection_t* mk_connection(struct sockaddr_in* peer, reldgram_t* rd)
 {
     connection_t* conn = btran_malloc(sizeof(connection_t));
     conn->connected    = 1;
     conn->n_owners     = 0;
+    conn->obj          = rd->obj;
+    conn->sendto       = rd->sendto;
+    conn->recvfrom     = rd->recvfrom;
     conn->peer         = *peer;
-    conn->msg_queue    = queue_init(queue_size);
     conn->last_alive   = time(0);
-    conn->recv_id = conn->send_id = 0;
-    pthread_mutex_init(&conn->conn_lock, NULL);
+    conn->ikcp         = ikcp_create(1337, conn);
+    ikcp_setmtu(conn->ikcp, rd->max_pkt_size);
+    ikcp_setoutput(conn->ikcp, ikcp_out);
     return conn;
 }
 
@@ -105,19 +80,21 @@ static void del_connection(connection_t* conn)
 {
     // connection is a shared pointer between the recv thread and the user
     // we need to check the if there are other owners before actually deleting
-    RUN_OR_FAIL(pthread_mutex_lock(&conn->conn_lock));
     conn->n_owners -= 1;
     conn->connected = 0;
-    if (conn->n_owners == 0) {
-        RUN_OR_FAIL(pthread_mutex_unlock(&conn->conn_lock));
-        queue_destroy(conn->msg_queue, (void (*)(void*)) & del_msg);
-        pthread_mutex_destroy(&conn->conn_lock);
+    if (conn->n_owners <= 0) {
+        ikcp_flush(conn->ikcp);
+        ikcp_release(conn->ikcp);
         btran_free(conn);
-        return;
     }
-    RUN_OR_FAIL(pthread_mutex_unlock(&conn->conn_lock));
 }
 
+static time_t time_ms()
+{
+    struct timeval tv;
+    gettimeofday(&tv, NULL);
+    return tv.tv_sec * 1000 + tv.tv_usec / 1000;
+}
 static void msleep(int msec) { usleep(msec * 1000); }
 
 const char* reldgram_strerror(int errno)
@@ -131,6 +108,8 @@ const char* reldgram_strerror(int errno)
             return "peer offline";
         case ERR_TOO_MANY_RETRY:
             return "too many retry";
+        case ERR_BUFFER_TOO_LONG:
+            return "buffer too long";
         default:
             break;
     }
@@ -155,6 +134,7 @@ reldgram_t* reldgram_init(void* obj,
     rd->conns          = NULL;
     rd->conns_size     = 0;
     rd->conns_capacity = 0;
+    rd->max_pkt_size   = 1400;
 
     pthread_mutex_init(&rd->conns_lock, NULL);
     pthread_mutex_init(&rd->pending_lock, NULL);
@@ -163,15 +143,20 @@ reldgram_t* reldgram_init(void* obj,
 
 void reldgram_disconnect(reldgram_t* rd)
 {
+    for (size_t i = 0; i < rd->conns_size; ++i) {
+        // send a RST packet to the peer
+        if (rd->conns[i]->connected) {
+            ikcp_flush(rd->conns[i]->ikcp);
+            while (ikcp_waitsnd(rd->conns[i]->ikcp) > 0)
+                msleep(10);
+            rd->sendto(rd->obj, &rd->conns[i]->peer, pkt_rst, sizeof(pkt_rst));
+            rd->conns[i]->connected = 0;
+        }
+    }
+
     if (rd->thread_running) {
         rd->thread_running = 0;
         pthread_join(rd->thread, NULL);
-    }
-
-    for (size_t i = 0; i < rd->conns_size; ++i) {
-        // send a RST packet to the peer
-        rd->sendto(rd->obj, &rd->conns[i]->peer, pkt_rst, sizeof(pkt_rst));
-        rd->conns[i]->connected = 0;
     }
     rd->type = TY_DISCONNECTED;
 }
@@ -201,12 +186,20 @@ static void* thread_listen(void* _rd)
 {
     reldgram_t* rd = (reldgram_t*)_rd;
 
-    uint8_t            tmp[RELDGRAM_MAX_PKT_SIZE + 5];
+    uint8_t            tmp[rd->max_pkt_size + 1];
     struct sockaddr_in addr;
 
     while (rd->thread_running) {
         int n =
             rd->recvfrom(rd->obj, &addr, tmp, sizeof(tmp), RECV_POLL_TIMEOUT);
+
+        RUN_OR_FAIL(pthread_mutex_lock(&rd->conns_lock));
+        time_t currtime = time_ms();
+        for (size_t i = 0; i < rd->conns_size; ++i)
+            if (rd->conns[i]->connected)
+                ikcp_update(rd->conns[i]->ikcp, currtime);
+        RUN_OR_FAIL(pthread_mutex_unlock(&rd->conns_lock));
+
         if (n <= 0) {
             // no data, in the meanwhile:
             //     - check if some peer disconnected
@@ -240,6 +233,7 @@ static void* thread_listen(void* _rd)
                     // malformed packet
                     continue;
 
+                debug("thread_listen(): received CONN pkt");
                 RUN_OR_FAIL(pthread_mutex_lock(&rd->pending_lock));
 
                 int has_conn = 0;
@@ -256,6 +250,8 @@ static void* thread_listen(void* _rd)
                 if (has_conn) {
                     // received a CONN packet in an established connection,
                     // resending CONN_ACK
+                    debug("thread_listen(): the peer already has an active "
+                          "connection");
                     RUN_OR_FAIL(pthread_mutex_unlock(&rd->conns_lock));
                     RUN_OR_FAIL(pthread_mutex_unlock(&rd->pending_lock));
                     rd->sendto(rd->obj, &addr, pkt_conn_ack,
@@ -280,6 +276,8 @@ static void* thread_listen(void* _rd)
                 if (in_queue) {
                     // the connection is already in queue, resending CONN_ACK
                     RUN_OR_FAIL(pthread_mutex_unlock(&rd->pending_lock));
+                    debug("thread_listen(): the peer is already in pending "
+                          "queue");
                     rd->sendto(rd->obj, &addr, pkt_conn_ack,
                                sizeof(pkt_conn_ack));
                     continue;
@@ -292,70 +290,26 @@ static void* thread_listen(void* _rd)
                     // not enough space in queue, dropping the connection
                     btran_free(paddr);
                 RUN_OR_FAIL(pthread_mutex_unlock(&rd->pending_lock));
+                debug("thread_listen(): peer added to pending queue");
                 break;
             }
             case PKT_DATA: {
                 // handle reception of a new packet
-                if (n < 5)
+                if (n < 2)
                     // malformed packet
                     continue;
-                uint32_t pkt_id_netendian;
-                memcpy((uint8_t*)&pkt_id_netendian, tmp + 1, sizeof(uint32_t));
-                uint32_t pkt_id = ntohl(pkt_id_netendian);
-
+                debug("thread_listen(): received DATA pkt");
                 RUN_OR_FAIL(pthread_mutex_lock(&rd->conns_lock));
                 for (size_t i = 0; i < rd->conns_size; ++i)
                     if (rd->conns[i]->connected &&
                         rd->conns[i]->peer.sin_addr.s_addr ==
                             addr.sin_addr.s_addr &&
                         rd->conns[i]->peer.sin_port == addr.sin_port) {
+                        debug("thread_listen(): data dispatched [len: %d]",
+                              n - 1);
                         connection_t* conn = rd->conns[i];
                         conn->last_alive   = time(0);
-                        if (pkt_id < conn->recv_id) {
-                            // received the an old packet, sending ACK
-                            uint8_t pkt[5];
-                            mk_pkt_data_ack(pkt_id, pkt);
-                            rd->sendto(rd->obj, &addr, pkt, sizeof(pkt));
-                        } else if (conn->recv_id == pkt_id) {
-                            // received the expected packet, adding to queue and
-                            // sending ACK (if enqueue was successful)
-                            msg_t* msg = mk_msg(tmp + 5, n - 5);
-                            RUN_OR_FAIL(pthread_mutex_lock(&conn->conn_lock));
-                            if (queue_write(conn->msg_queue, msg) == 0) {
-                                conn->recv_id += 1;
-
-                                uint8_t pkt[5];
-                                mk_pkt_data_ack(pkt_id, pkt);
-                                rd->sendto(rd->obj, &addr, pkt, sizeof(pkt));
-                            } else
-                                // queue is full
-                                del_msg(msg);
-                            RUN_OR_FAIL(pthread_mutex_unlock(&conn->conn_lock));
-                        }
-                        break;
-                    }
-                RUN_OR_FAIL(pthread_mutex_unlock(&rd->conns_lock));
-                break;
-            }
-            case PKT_DATA_ACK: {
-                // handle reception of an ack
-                if (n != 5)
-                    // malformed packet
-                    continue;
-
-                uint32_t pkt_id_netendian;
-                memcpy((uint8_t*)&pkt_id_netendian, tmp + 1, sizeof(uint32_t));
-                uint32_t pkt_id = ntohl(pkt_id_netendian);
-                RUN_OR_FAIL(pthread_mutex_lock(&rd->conns_lock));
-                for (size_t i = 0; i < rd->conns_size; ++i)
-                    if (rd->conns[i]->connected &&
-                        rd->conns[i]->peer.sin_addr.s_addr ==
-                            addr.sin_addr.s_addr &&
-                        rd->conns[i]->peer.sin_port == addr.sin_port) {
-                        connection_t* conn = rd->conns[i];
-                        conn->last_alive   = time(0);
-                        if (conn->send_id == pkt_id)
-                            conn->send_id += 1;
+                        ikcp_input(conn->ikcp, (const char*)(tmp + 1), n - 1);
                         break;
                     }
                 RUN_OR_FAIL(pthread_mutex_unlock(&rd->conns_lock));
@@ -433,12 +387,16 @@ static void* thread_client_peer(void* _rd)
 {
     reldgram_t* rd = (reldgram_t*)_rd;
 
-    uint8_t            tmp[RELDGRAM_MAX_PKT_SIZE + 5];
+    uint8_t            tmp[rd->max_pkt_size + 1];
     struct sockaddr_in addr;
 
     while (rd->thread_running) {
         int n =
             rd->recvfrom(rd->obj, &addr, tmp, sizeof(tmp), RECV_POLL_TIMEOUT);
+        if (rd->conns[0]->connected) {
+            time_t currtime = time_ms();
+            ikcp_update(rd->conns[0]->ikcp, currtime);
+        }
         if (n <= 0) {
             time_t curtime = time(0);
             if (curtime - rd->conns[0]->last_alive >= 3 * ALIVE_SEC_THRESHOLD) {
@@ -461,9 +419,12 @@ static void* thread_client_peer(void* _rd)
                     // malformed packet
                     continue;
 
+                debug("thread_client_peer(): received CONN_ACK pkt");
                 connection_t* conn = rd->conns[0];
-                if (conn->peer.sin_addr.s_addr == addr.sin_addr.s_addr &&
+                if (!conn->connected &&
+                    conn->peer.sin_addr.s_addr == addr.sin_addr.s_addr &&
                     conn->peer.sin_port == addr.sin_port) {
+                    debug("thread_client_peer(): connection was successfull");
                     conn->last_alive = time(0);
                     conn->connected  = 1;
                 }
@@ -471,61 +432,19 @@ static void* thread_client_peer(void* _rd)
             }
             case PKT_DATA: {
                 // handle reception of a new packet
-                if (n < 5)
+                if (n < 2)
                     // malformed packet
                     continue;
 
-                uint32_t pkt_id_netendian;
-                memcpy((uint8_t*)&pkt_id_netendian, tmp + 1, sizeof(uint32_t));
-                uint32_t      pkt_id = ntohl(pkt_id_netendian);
-                connection_t* conn   = rd->conns[0];
-
-                if (conn->connected &&
-                    conn->peer.sin_addr.s_addr == addr.sin_addr.s_addr &&
-                    conn->peer.sin_port == addr.sin_port) {
-                    conn->last_alive = time(0);
-                    if (pkt_id < conn->recv_id) {
-                        // received the an old packet, sending ACK
-                        uint8_t pkt[5];
-                        mk_pkt_data_ack(pkt_id, pkt);
-                        rd->sendto(rd->obj, &addr, pkt, sizeof(pkt));
-                    } else if (conn->recv_id == pkt_id) {
-                        // received the expected packet, adding to queue and
-                        // sending ACK (if enqueue was successful)
-                        msg_t* msg = mk_msg(tmp + 5, n - 5);
-                        RUN_OR_FAIL(pthread_mutex_lock(&conn->conn_lock));
-                        if (queue_write(conn->msg_queue, msg) == 0) {
-                            conn->recv_id += 1;
-
-                            uint8_t pkt[5];
-                            mk_pkt_data_ack(pkt_id, pkt);
-                            rd->sendto(rd->obj, &addr, pkt, sizeof(pkt));
-                        } else {
-                            // queue is full
-                            del_msg(msg);
-                        }
-                        RUN_OR_FAIL(pthread_mutex_unlock(&conn->conn_lock));
-                    }
-                }
-                break;
-            }
-            case PKT_DATA_ACK: {
-                // handle reception of an ack
-                if (n != 5)
-                    // malformed packet
-                    continue;
-
+                debug("thread_client_peer(): received DATA pkt");
                 connection_t* conn = rd->conns[0];
-                uint32_t      pkt_id_netendian;
-                memcpy((uint8_t*)&pkt_id_netendian, tmp + 1, sizeof(uint32_t));
-                uint32_t pkt_id = ntohl(pkt_id_netendian);
-
                 if (conn->connected &&
                     conn->peer.sin_addr.s_addr == addr.sin_addr.s_addr &&
                     conn->peer.sin_port == addr.sin_port) {
+                    debug("thread_client_peer(): data dispatched [len: %d]",
+                          n - 1);
                     conn->last_alive = time(0);
-                    if (conn->send_id == pkt_id)
-                        conn->send_id += 1;
+                    ikcp_input(conn->ikcp, (const char*)(tmp + 1), n - 1);
                 }
                 break;
             }
@@ -625,7 +544,7 @@ reldgram_t* reldgram_accept(reldgram_t* rd)
         rd->conns =
             realloc(rd->conns, rd->conns_capacity * sizeof(connection_t*));
     }
-    rd->conns[rd->conns_size] = mk_connection(addr, MSG_QUEUE_CAPACITY);
+    rd->conns[rd->conns_size] = mk_connection(addr, rd);
     connection_t* conn        = rd->conns[rd->conns_size++];
     conn->n_owners            = 2;
     RUN_OR_FAIL(pthread_mutex_unlock(&rd->conns_lock));
@@ -650,7 +569,7 @@ int reldgram_connect(reldgram_t* rd, struct sockaddr_in* addr)
     rd->conns_size         = 1;
     rd->conns_capacity     = 1;
     rd->thread_running     = 1;
-    rd->conns[0]           = mk_connection(addr, MSG_QUEUE_CAPACITY);
+    rd->conns[0]           = mk_connection(addr, rd);
     rd->conns[0]->n_owners = 2;
     if (pthread_create(&rd->thread, NULL, &thread_client_peer, rd) != 0)
         return ERR_PTHREAD_CREATE_FAILED;
@@ -674,92 +593,41 @@ int reldgram_send(reldgram_t* rd, const uint8_t* data, uint32_t data_size)
 {
     if (rd->type != TY_CLIENT_PEER && rd->type != TY_SERVER_PEER)
         return ERR_WRONG_TYPE;
+    if ((int)data_size < 0)
+        return ERR_BUFFER_TOO_LONG;
 
-    connection_t* conn      = rd->conns[0];
-    time_t        init_time = time(0);
-    int           time_tick = 0;
-
-    uint32_t nsent = 0;
-    while (nsent != data_size) {
-        if (time_tick++ % 10 == 5 && VERBOSE_SEND) {
-            time_t curr_time = time(0);
-            printf("[+] sending %d / %d [%0.1Lf KB/s]\n", nsent, data_size,
-                   (double)nsent / (double)(curr_time - init_time) / 1000.0l);
-        }
-
-        uint32_t pkt_id      = conn->send_id;
-        uint32_t prev_pkt_id = pkt_id;
-        int      num_retry   = MAX_SEND_RETRY;
-        int      success     = 0;
-        while (num_retry--) {
-            if (!conn->connected) {
-                if (rd->type == TY_CLIENT_PEER)
-                    reldgram_disconnect(rd);
-                return ERR_PEER_OFFLINE;
-            }
-
-            int      nchunk_sent = conn->send_id - pkt_id;
-            uint32_t off         = nchunk_sent * RELDGRAM_MAX_PKT_SIZE;
-            for (int i = nchunk_sent;
-                 i < CONCURRENT_SEND && off + nsent < data_size; ++i) {
-                uint32_t chunk_size =
-                    min(RELDGRAM_MAX_PKT_SIZE, data_size - nsent - off);
-
-                uint8_t pkt[RELDGRAM_MAX_PKT_SIZE + 5];
-                mk_pkt_data(pkt_id + i, data + off + nsent, chunk_size, pkt);
-                rd->sendto(rd->obj, &conn->peer, pkt, chunk_size + 5);
-
-                off += chunk_size;
-                nchunk_sent += 1;
-                if (off == data_size) {
-                    success = 0;
-                    break;
-                }
-            }
-
-            msleep(SEND_RETRY_SLEEP_TIME);
-            if (conn->send_id == pkt_id + nchunk_sent) {
-                nsent += off;
-                success = 1;
-                break;
-            }
-            if (conn->send_id != prev_pkt_id) {
-                prev_pkt_id = conn->send_id;
-                num_retry   = MAX_SEND_RETRY;
-            }
-        }
-        if (!success)
-            return ERR_TOO_MANY_RETRY;
+    connection_t* conn = rd->conns[0];
+    if (!conn->connected) {
+        reldgram_disconnect(rd);
+        return ERR_PEER_OFFLINE;
     }
+
+    ikcp_send(conn->ikcp, (const char*)data, (int)data_size);
     return NO_ERR;
 }
 
-int reldgram_recv(reldgram_t* rd, uint8_t** data, uint32_t* data_size)
+int reldgram_recv(reldgram_t* rd, uint8_t* data, uint32_t data_size,
+                  uint32_t* nread)
 {
-    *data      = NULL;
-    *data_size = 0;
-
     if (rd->type != TY_CLIENT_PEER && rd->type != TY_SERVER_PEER)
         return ERR_WRONG_TYPE;
+    if ((int)data_size < 0)
+        return ERR_BUFFER_TOO_LONG;
 
+    debug("reldgram_recv(): waiting for data");
     connection_t* conn = rd->conns[0];
-    while (1) {
-        if (!conn->connected) {
-            reldgram_disconnect(rd);
-            return ERR_PEER_OFFLINE;
-        }
-        RUN_OR_FAIL(pthread_mutex_lock(&conn->conn_lock));
-        msg_t* msg;
-        if ((msg = (msg_t*)queue_read(conn->msg_queue)) != NULL) {
-            *data      = msg->data;
-            *data_size = msg->size;
-            btran_free(msg);
-        }
-        RUN_OR_FAIL(pthread_mutex_unlock(&conn->conn_lock));
-        if (*data)
-            break;
-        msleep(10);
+    int           r    = -1;
+    while (conn->connected && r < 0) {
+        if ((r = ikcp_recv(conn->ikcp, (char*)data, (int)data_size)) < 0)
+            msleep(10);
     }
+    if (!conn->connected) {
+        reldgram_disconnect(rd);
+        return ERR_PEER_OFFLINE;
+    }
+
+    debug("reldgram_recv(): data received [len: %d]", r);
+    *nread = r;
     return NO_ERR;
 }
 

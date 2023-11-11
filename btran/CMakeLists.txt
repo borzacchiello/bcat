@@ -13,6 +13,7 @@ set(src
     tcp.c
     udp.c
     reldgram.c
+    ikcp.c
     queue.c
     salsa20.c
     sha256.c

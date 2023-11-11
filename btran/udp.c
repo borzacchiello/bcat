@@ -88,7 +88,7 @@ static int udp_recv_wapper(void* user, struct sockaddr_in* addr, uint8_t* data,
                            uint32_t data_size, uint32_t timeout)
 {
     int            fd       = (long)user;
-    struct timeval wait     = {.tv_sec = timeout, .tv_usec = 0};
+    struct timeval wait     = {.tv_sec = 0, .tv_usec = timeout * 1000};
     socklen_t      addr_len = sizeof(struct sockaddr_in);
 
     fd_set set;
@@ -225,21 +225,11 @@ static int udp_recv(btran_ctx_t* ctx, uint8_t* buf, uint32_t buf_size,
         return 1;
     }
 
-    uint8_t* data;
-    uint32_t data_size;
-    int      r = reldgram_recv(ub->dgram_ctx, &data, &data_size);
+    int r = reldgram_recv(ub->dgram_ctx, buf, buf_size, nread);
     if (r != NO_ERR) {
         error("udp_recv(): reldgram_recv failed [%s]", reldgram_strerror(r));
         return 1;
     }
-    if (buf_size < data_size)
-        // FIXME: handle this case
-        abort();
-
-    memcpy(buf, data, data_size);
-    *nread = data_size;
-
-    btran_free(data);
     return 0;
 }
 
