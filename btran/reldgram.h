@@ -18,23 +18,28 @@
 #define ERR_BUFFER_TOO_LONG       -5
 
 typedef struct connection_t {
-    pthread_mutex_t conn_lock;
-    int             n_owners;
-
     void* obj;
     int   (*sendto)(void* obj, struct sockaddr_in* addr, const uint8_t* data,
                   uint32_t data_size);
     int   (*recvfrom)(void* obj, struct sockaddr_in* addr, uint8_t* data,
                     uint32_t data_size, uint32_t timeout);
 
-    atomic_bool connected;
-    time_t      last_alive;
+    pthread_mutex_t lock;
+    int             shared_count;
+
+    int    connected;
+    time_t last_alive;
 
     ikcpcb*            ikcp;
     struct sockaddr_in peer;
 } connection_t;
 
 typedef struct reldgram_t {
+    // FIXME: this lock is used for *everything* and is shared among all the
+    //        peers of the server it is unnecessary, and should be improved.
+    //        In this phase I prefer to keep the things simple
+    pthread_mutex_t* lock;
+
     void* obj;
     int   (*sendto)(void* obj, struct sockaddr_in* addr, const uint8_t* data,
                   uint32_t data_size);
@@ -42,17 +47,15 @@ typedef struct reldgram_t {
                     uint32_t data_size, uint32_t timeout);
     int   max_pkt_size;
 
-    int         type;
-    atomic_bool thread_running;
-    pthread_t   thread;
+    int       type;
+    int       disconnected;
+    int       thread_running;
+    pthread_t thread;
 
-    queue_t*        pending;
-    pthread_mutex_t pending_lock;
-
-    connection_t**  conns;
-    size_t          conns_capacity;
-    size_t          conns_size;
-    pthread_mutex_t conns_lock;
+    queue_t*       pending;
+    connection_t** conns;
+    size_t         conns_capacity;
+    size_t         conns_size;
 } reldgram_t;
 
 const char* reldgram_strerror(int errnum);
