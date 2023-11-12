@@ -148,6 +148,7 @@ void listen_loop(const char* addr, int port, btran_backend_t bty)
         btran_disconnect(&client);
         pthread_join(t, NULL);
         btran_dispose(&client);
+        thread_completed = 0;
 
         if (!keep)
             break;

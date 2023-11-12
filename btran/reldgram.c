@@ -236,6 +236,7 @@ static void* thread_listen(void* _rd)
                 if (!rd->conns[i]->connected ||
                     curtime - rd->conns[i]->last_alive >=
                         3 * ALIVE_SEC_THRESHOLD) {
+                    debug("thread_listen(): disconnecting (timeout)");
                     connection_t* conn = rd->conns[i];
                     conn->connected    = 0;
                     del_connection(conn);
@@ -380,6 +381,7 @@ static void* thread_listen(void* _rd)
                         rd->conns[i]->peer.sin_addr.s_addr ==
                             addr.sin_addr.s_addr &&
                         rd->conns[i]->peer.sin_port == addr.sin_port) {
+                        debug("thread_listen(): received RST");
                         connection_t* conn = rd->conns[i];
                         conn->connected    = 0;
                         del_connection(conn);
