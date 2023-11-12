@@ -7,6 +7,8 @@
 #include "btran.h"
 #include "alloc.h"
 #include "log.h"
+
+#include "icmp.h"
 #include "tcp.h"
 #include "udp.h"
 
@@ -52,8 +54,8 @@ int btran_init(btran_ctx_t* ctx, btran_backend_t type, const char* key)
             udp_backend_init(ctx);
             break;
         case BTRAN_ICMP:
-            error("ICMP unimplemented");
-            return 1;
+            icmp_backend_init(ctx);
+            break;
         default:
             error("invalid backend type %d", type);
             return 1;

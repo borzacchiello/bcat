@@ -452,8 +452,10 @@ static void* thread_client_peer(void* _rd)
                     // malformed packet
                     break;
 
-                debug("thread_client_peer(): received CONN_ACK pkt");
                 connection_t* conn = rd->conns[0];
+                debug("thread_client_peer(): received CONN_ACK pkt [port: %d, "
+                      "expected: %d]",
+                      addr.sin_port, conn->peer.sin_port);
                 if (!conn->connected &&
                     conn->peer.sin_addr.s_addr == addr.sin_addr.s_addr &&
                     conn->peer.sin_port == addr.sin_port) {
@@ -600,6 +602,7 @@ static int accept_try_one(reldgram_t* rd, reldgram_t** out)
     res->conns_size           = 1;
     res->conns_capacity       = 1;
     res->conns[0]             = conn;
+    res->max_pkt_size         = rd->max_pkt_size;
     conn->shared_count        = 2;
 
     rd->sendto(rd->obj, addr, pkt_conn_ack, sizeof(pkt_conn_ack));
