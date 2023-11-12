@@ -13,9 +13,13 @@ static struct option long_options[] = {
     {"listen", no_argument, 0, 'l'},
     {"protocol", required_argument, 0, 'P'},
     {"key", required_argument, 0, 'K'},
+    {"keep", no_argument, 0, 'k'},
     {"help", no_argument, 0, 'h'},
     {0, 0, 0, 0} // Null termination required
 };
+
+static const char* key  = NULL;
+static int         keep = 0;
 
 static void usage(const char* pname)
 {
@@ -25,7 +29,8 @@ static void usage(const char* pname)
             "    -h: print help\n"
             "    -l: listen mode\n"
             "    -K: key, required if not in listen mode\n"
-            "    -P: backend protocol type [tcp, udp, icmp]\n",
+            "    -P: backend protocol type [tcp, udp, icmp]\n"
+            "    -k: keep the connection alive\n",
             pname);
     exit(0);
 }
@@ -85,8 +90,7 @@ static void*       print_from_network_loop(void* _ctx)
     return NULL;
 }
 
-void listen_loop(const char* addr, int port, const char* key,
-                 btran_backend_t bty)
+void listen_loop(const char* addr, int port, btran_backend_t bty)
 {
     static uint8_t tmp[1024 * 10];
     char           keybuf[33];
@@ -111,44 +115,47 @@ void listen_loop(const char* addr, int port, const char* key,
     }
     fprintf(stderr, "[+] listening on %s:%d\n", addr, port);
 
-    btran_ctx_t client;
-    if (btran_accept(&ctx, &client) != 0) {
-        fprintf(stderr, "[!] btran_accept failed\n");
-        btran_dispose(&ctx);
-        return;
-    }
-    fprintf(stderr, "[+] client connected\n");
-
-    pthread_t t;
-    pthread_create(&t, NULL, &print_from_network_loop, &client);
     while (1) {
-        fd_set set;
-        FD_ZERO(&set);
-        FD_SET(0, &set);
-        struct timeval wait = {.tv_sec = 1, .tv_usec = 0};
-        select(0 + 1, &set, NULL, NULL, &wait);
+        btran_ctx_t client;
+        if (btran_accept(&ctx, &client) != 0) {
+            fprintf(stderr, "[!] btran_accept failed\n");
+            continue;
+        }
+        fprintf(stderr, "[+] client connected\n");
 
-        if (FD_ISSET(0, &set)) {
-            ssize_t n = read(0, tmp, sizeof(tmp));
-            if (n <= 0)
-                break;
-            if (btran_send(&client, tmp, n) != 0)
+        pthread_t t;
+        pthread_create(&t, NULL, &print_from_network_loop, &client);
+        while (1) {
+            fd_set set;
+            FD_ZERO(&set);
+            FD_SET(0, &set);
+            struct timeval wait = {.tv_sec = 1, .tv_usec = 0};
+            select(0 + 1, &set, NULL, NULL, &wait);
+
+            if (FD_ISSET(0, &set)) {
+                ssize_t n = read(0, tmp, sizeof(tmp));
+                if (n <= 0)
+                    break;
+                if (btran_send(&client, tmp, n) != 0)
+                    break;
+            }
+
+            if (thread_completed)
+                // thread does not exist, exiting
                 break;
         }
 
-        if (thread_completed)
-            // thread does not exist, exiting
+        btran_disconnect(&client);
+        pthread_join(t, NULL);
+        btran_dispose(&client);
+
+        if (!keep)
             break;
     }
-
-    btran_disconnect(&client);
-    pthread_join(t, NULL);
-    btran_dispose(&client);
     btran_dispose(&ctx);
 }
 
-void connect_loop(const char* addr, int port, const char* key,
-                  btran_backend_t bty)
+void connect_loop(const char* addr, int port, btran_backend_t bty)
 {
     static uint8_t tmp[1024 * 10];
 
@@ -197,10 +204,9 @@ int main(int argc, char* const* argv)
     int             listen_mode = 0;
     btran_backend_t backend_ty  = BTRAN_TCP;
 
-    const char* key = NULL;
-    int         opt;
-    int         option_index = 0;
-    while ((opt = getopt_long(argc, argv, "lK:P:h", long_options,
+    int opt;
+    int option_index = 0;
+    while ((opt = getopt_long(argc, argv, "lK:P:kh", long_options,
                               &option_index)) != -1) {
         switch (opt) {
             case 'l':
@@ -215,6 +221,9 @@ int main(int argc, char* const* argv)
                 break;
             case 'K':
                 key = optarg;
+                break;
+            case 'k':
+                keep = 1;
                 break;
             case 'h':
                 usage(argv[0]);
@@ -253,8 +262,13 @@ int main(int argc, char* const* argv)
     setvbuf(stdout, NULL, _IONBF, 0);
 
     if (listen_mode)
-        listen_loop(addr, port, key, backend_ty);
-    else
-        connect_loop(addr, port, key, backend_ty);
+        listen_loop(addr, port, backend_ty);
+    else {
+        while (1) {
+            connect_loop(addr, port, backend_ty);
+            if (!keep)
+                break;
+        }
+    }
     return 0;
 }
