@@ -149,6 +149,7 @@ void listen_loop(const char* addr, int port, btran_backend_t bty)
         pthread_join(t, NULL);
         btran_dispose(&client);
         thread_completed = 0;
+        fprintf(stderr, "[+] client disconnected\n");
 
         if (!keep)
             break;
@@ -159,6 +160,7 @@ void listen_loop(const char* addr, int port, btran_backend_t bty)
 void connect_loop(const char* addr, int port, btran_backend_t bty)
 {
     static uint8_t tmp[1024 * 10];
+    thread_completed = 0;
 
     btran_ctx_t ctx;
     if (btran_init(&ctx, bty, key) != 0) {
@@ -198,6 +200,7 @@ void connect_loop(const char* addr, int port, btran_backend_t bty)
     btran_disconnect(&ctx);
     pthread_join(t, NULL);
     btran_dispose(&ctx);
+    fprintf(stderr, "[+] disconnected\n");
 }
 
 int main(int argc, char* const* argv)
@@ -269,6 +272,7 @@ int main(int argc, char* const* argv)
             connect_loop(addr, port, backend_ty);
             if (!keep)
                 break;
+            sleep(5);
         }
     }
     return 0;

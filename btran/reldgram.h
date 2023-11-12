@@ -28,6 +28,7 @@ typedef struct connection_t {
     int             shared_count;
 
     int    connected;
+    time_t last_ping;
     time_t last_alive;
 
     ikcpcb*            ikcp;

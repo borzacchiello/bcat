@@ -14,10 +14,10 @@
     if (runnable != 0)                                                         \
         abort();
 
-#define MAX_CONN_RETRY        10
-#define CONN_RETRY_SLEEP_TIME 100
+#define MAX_CONN_RETRY        5
+#define CONN_RETRY_SLEEP_TIME 1200
 #define RECV_POLL_TIMEOUT     10
-#define ALIVE_SEC_THRESHOLD   10
+#define ALIVE_SEC_THRESHOLD   5
 
 #define PENDING_CONN_CAPACITY 10
 
@@ -70,6 +70,7 @@ static connection_t* mk_connection(struct sockaddr_in* peer, reldgram_t* rd)
     conn->last_alive   = time(0);
     conn->ikcp         = ikcp_create(1337, conn);
     conn->shared_count = 0;
+    conn->last_ping    = conn->last_alive;
     ikcp_setmtu(conn->ikcp, rd->max_pkt_size);
     ikcp_setoutput(conn->ikcp, ikcp_out);
     pthread_mutex_init(&conn->lock, NULL);
@@ -222,20 +223,20 @@ static void* thread_listen(void* _rd)
         int n =
             rd->recvfrom(rd->obj, &addr, tmp, sizeof(tmp), RECV_POLL_TIMEOUT);
 
-        time_t currtime = time_ms();
+        time_t curtime_ms = time_ms();
         for (size_t i = 0; i < rd->conns_size; ++i)
             if (rd->conns[i]->connected)
-                ikcp_update(rd->conns[i]->ikcp, currtime);
+                ikcp_update(rd->conns[i]->ikcp, curtime_ms);
 
         if (n <= 0) {
             // no data, in the meanwhile:
             //     - check if some peer disconnected
             //     - send PING if needed
-            time_t curtime = time(0);
+            time_t curtime_s = time(0);
             for (size_t i = 0; i < rd->conns_size; ++i) {
                 if (!rd->conns[i]->connected ||
-                    curtime - rd->conns[i]->last_alive >=
-                        3 * ALIVE_SEC_THRESHOLD) {
+                    (curtime_s - rd->conns[i]->last_alive >=
+                     3 * ALIVE_SEC_THRESHOLD)) {
                     debug("thread_listen(): disconnecting (timeout)");
                     connection_t* conn = rd->conns[i];
                     conn->connected    = 0;
@@ -244,9 +245,13 @@ static void* thread_listen(void* _rd)
                         rd->conns[i] = rd->conns[rd->conns_size - 1];
                     rd->conns_size -= 1;
                     break;
-                } else if (curtime - rd->conns[i]->last_alive >=
-                           ALIVE_SEC_THRESHOLD) {
+                } else if (curtime_s - rd->conns[i]->last_alive >=
+                               ALIVE_SEC_THRESHOLD &&
+                           curtime_s - rd->conns[i]->last_ping >=
+                               ALIVE_SEC_THRESHOLD) {
                     // no data for a while, let's ping the peer
+                    debug("thread_listen(): sending a ping");
+                    rd->conns[i]->last_ping = curtime_s;
                     rd->sendto(rd->obj, &rd->conns[i]->peer, pkt_ping,
                                sizeof(pkt_ping));
                 }
@@ -297,11 +302,9 @@ static void* thread_listen(void* _rd)
                     i = (i + 1) % rd->pending->size;
                 }
                 if (in_queue) {
-                    // the connection is already in queue, resending CONN_ACK
+                    // the connection is already in queue, ignoring
                     debug("thread_listen(): the peer is already in pending "
                           "queue");
-                    rd->sendto(rd->obj, &addr, pkt_conn_ack,
-                               sizeof(pkt_conn_ack));
                     break;
                 }
 
@@ -418,19 +421,23 @@ static void* thread_client_peer(void* _rd)
         int n =
             rd->recvfrom(rd->obj, &addr, tmp, sizeof(tmp), RECV_POLL_TIMEOUT);
         if (rd->conns[0]->connected) {
-            time_t currtime = time_ms();
-            ikcp_update(rd->conns[0]->ikcp, currtime);
+            time_t curime_ms = time_ms();
+            ikcp_update(rd->conns[0]->ikcp, curime_ms);
         }
         if (n <= 0) {
-            time_t curtime = time(0);
-            if (curtime - rd->conns[0]->last_alive >= 3 * ALIVE_SEC_THRESHOLD) {
+            time_t curtime_s = time(0);
+            if (curtime_s - rd->conns[0]->last_alive >=
+                3 * ALIVE_SEC_THRESHOLD) {
                 // no data for too long, silently disconnect
                 rd->conns[0]->connected = 0;
                 rd->thread_running      = 0;
                 break;
-            } else if (curtime - rd->conns[0]->last_alive >=
-                       ALIVE_SEC_THRESHOLD) {
+            } else if (curtime_s - rd->conns[0]->last_alive >=
+                           ALIVE_SEC_THRESHOLD &&
+                       curtime_s - rd->conns[0]->last_ping >=
+                           ALIVE_SEC_THRESHOLD) {
                 // no data for a while, let's ping the peer
+                rd->conns[0]->last_ping = curtime_s;
                 rd->sendto(rd->obj, &rd->conns[0]->peer, pkt_ping,
                            sizeof(pkt_ping));
             }
