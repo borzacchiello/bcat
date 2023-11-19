@@ -1,9 +1,11 @@
 #include <sys/socket.h>
+#include <sys/select.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
 #include <unistd.h>
 #include <string.h>
 #include <errno.h>
+#include <time.h>
 
 #include "alloc.h"
 #include "log.h"
@@ -183,12 +185,23 @@ static int tcp_recv(btran_ctx_t* ctx, uint8_t* buf, uint32_t buf_size,
         return 1;
     }
 
+    if (timeout) {
+        struct timeval wait = {.tv_sec = timeout, .tv_usec = 0};
+        fd_set         set;
+        FD_ZERO(&set);
+        FD_SET(tb->fd, &set);
+        if (select(tb->fd + 1, &set, NULL, NULL, &wait) <= 0)
+            return 1;
+    }
     ssize_t received = recv(tb->fd, buf, buf_size, 0);
     if (received < 0) {
         int r = errno;
         error("tcp_recv() recv failed: %s", strerror(r));
         return r;
     }
+    if (received == 0)
+        // FIN pkt received
+        return 1;
 
     *nread = (uint32_t)received;
     return 0;

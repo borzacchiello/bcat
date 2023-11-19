@@ -16,6 +16,7 @@
 #define ERR_PEER_OFFLINE          -3
 #define ERR_TOO_MANY_RETRY        -4
 #define ERR_BUFFER_TOO_LONG       -5
+#define ERR_TIMEOUT_ELAPSED       -6
 
 typedef struct connection_t {
     void* obj;
@@ -77,7 +78,7 @@ int         reldgram_connect(reldgram_t* rd, struct sockaddr_in* addr);
 
 int reldgram_send(reldgram_t* rd, const uint8_t* data, uint32_t data_size);
 int reldgram_recv(reldgram_t* rd, uint8_t* data, uint32_t data_size,
-                  uint32_t* nread);
+                  uint32_t* nread, uint32_t timeout);
 
 int reldgram_get_peer_info(reldgram_t* rd, char** addr, int* port);
 

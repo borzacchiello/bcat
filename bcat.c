@@ -264,6 +264,7 @@ int main(int argc, char* const* argv)
 
     setvbuf(stdin, NULL, _IONBF, 0);
     setvbuf(stdout, NULL, _IONBF, 0);
+    signal(SIGPIPE, SIG_IGN);
 
     if (listen_mode)
         listen_loop(addr, port, backend_ty);

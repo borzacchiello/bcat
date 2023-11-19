@@ -196,9 +196,9 @@ static int icmp_recv_wapper(void* user, struct sockaddr_in* addr, uint8_t* data,
     int                packet_size   = recvfrom(ub->fd, packet, enc_MTU, 0,
                                                 (struct sockaddr*)&(src_addr), &src_addr_size);
 
-    struct iphdr*   ip   = (struct iphdr*)packet;
-    struct icmphdr* icmp = (struct icmphdr*)(packet + sizeof(struct iphdr));
-    uint16_t*       icmp_payload_port =
+    struct iphdr* ip = (struct iphdr*)packet;
+    // struct icmphdr* icmp = (struct icmphdr*)(packet + sizeof(struct iphdr));
+    uint16_t* icmp_payload_port =
         (uint16_t*)(packet + sizeof(struct iphdr) + sizeof(struct icmphdr));
     char* icmp_payload = (char*)(packet + sizeof(struct iphdr) +
                                  sizeof(struct icmphdr) + sizeof(uint16_t));
@@ -372,7 +372,7 @@ static int icmp_recv(btran_ctx_t* ctx, uint8_t* buf, uint32_t buf_size,
         return 1;
     }
 
-    int r = reldgram_recv(ub->dgram_ctx, buf, buf_size, nread);
+    int r = reldgram_recv(ub->dgram_ctx, buf, buf_size, nread, timeout);
     if (r != NO_ERR) {
         error("icmp_recv(): reldgram_recv failed [%s]", reldgram_strerror(r));
         return 1;

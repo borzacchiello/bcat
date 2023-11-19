@@ -113,6 +113,8 @@ const char* reldgram_strerror(int errno)
             return "too many retry";
         case ERR_BUFFER_TOO_LONG:
             return "buffer too long";
+        case ERR_TIMEOUT_ELAPSED:
+            return "timeout elapsed";
         default:
             break;
     }
@@ -120,10 +122,10 @@ const char* reldgram_strerror(int errno)
 }
 
 reldgram_t* reldgram_init(void* obj,
-                          int   (*sendto)(void* obj, struct sockaddr_in* addr,
+                          int (*sendto)(void* obj, struct sockaddr_in* addr,
                                         const uint8_t* data,
                                         uint32_t       data_size),
-                          int   (*recvfrom)(void* obj, struct sockaddr_in* addr,
+                          int (*recvfrom)(void* obj, struct sockaddr_in* addr,
                                           uint8_t* data, uint32_t data_size,
                                           uint32_t timeout))
 {
@@ -757,9 +759,11 @@ cleanup:
 }
 
 int reldgram_recv(reldgram_t* rd, uint8_t* data, uint32_t data_size,
-                  uint32_t* nread)
+                  uint32_t* nread, uint32_t timeout)
 {
     debug("reldgram_recv(): waiting for data");
+
+    time_t start = time(NULL);
     while (1) {
         int status;
         int r = recv_try_one(rd, data, data_size, nread, &status);
@@ -768,6 +772,8 @@ int reldgram_recv(reldgram_t* rd, uint8_t* data, uint32_t data_size,
         if (r == RECV_OK)
             break;
         msleep(10);
+        if (timeout && (time(NULL) - start) >= timeout)
+            return ERR_TIMEOUT_ELAPSED;
     }
 
     debug("reldgram_recv(): data received [len: %u]", *nread);

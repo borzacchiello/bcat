@@ -13,7 +13,7 @@ typedef enum btran_backend_t {
 
 struct btran_ctx_t;
 typedef struct btran_ftab_t {
-    int  (*dispose)(struct btran_ctx_t* ctx);
+    int (*dispose)(struct btran_ctx_t* ctx);
     void (*disconnect)(struct btran_ctx_t* ctx);
 
     int (*listen)(struct btran_ctx_t* ctx, const char* addr, int port);

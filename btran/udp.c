@@ -225,7 +225,7 @@ static int udp_recv(btran_ctx_t* ctx, uint8_t* buf, uint32_t buf_size,
         return 1;
     }
 
-    int r = reldgram_recv(ub->dgram_ctx, buf, buf_size, nread);
+    int r = reldgram_recv(ub->dgram_ctx, buf, buf_size, nread, timeout);
     if (r != NO_ERR) {
         error("udp_recv(): reldgram_recv failed [%s]", reldgram_strerror(r));
         return 1;
