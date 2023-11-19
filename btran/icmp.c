@@ -204,7 +204,7 @@ static int icmp_recv_wapper(void* user, struct sockaddr_in* addr, uint8_t* data,
     socklen_t          src_addr_size = sizeof(struct sockaddr_in);
     int                packet_size   = recvfrom(ub->fd, packet, enc_MTU, 0,
                                                 (struct sockaddr*)&(src_addr), &src_addr_size);
-    if (packet_size < MIN_PACKET_SIZE) {
+    if (packet_size < (int)MIN_PACKET_SIZE) {
         error("icmp_recv_wapper(): malformed packet");
         return -1;
     }

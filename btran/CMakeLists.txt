@@ -39,3 +39,4 @@ set_target_properties(libbtran_static PROPERTIES OUTPUT_NAME btran)
 set_target_properties(libbtran_shared PROPERTIES OUTPUT_NAME btran)
 
 install(FILES btran.h DESTINATION include)
+install(TARGETS libbtran_shared)

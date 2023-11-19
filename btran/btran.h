@@ -43,6 +43,6 @@ int btran_connect(btran_ctx_t* ctx, const char* addr, int port);
 int btran_accept(btran_ctx_t* ctx, btran_ctx_t* o_conn);
 int btran_recv(btran_ctx_t* ctx, uint8_t** o_buf, uint32_t* o_size,
                uint32_t timeout);
-int btran_send(btran_ctx_t* ctx, uint8_t* buf, uint32_t size);
+int btran_send(btran_ctx_t* ctx, const uint8_t* buf, uint32_t size);
 
 #endif

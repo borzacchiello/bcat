@@ -294,7 +294,7 @@ static int send_uint32_t(btran_ctx_t* ctx, uint32_t data)
     return 0;
 }
 
-int btran_send(btran_ctx_t* ctx, uint8_t* buf, uint32_t size)
+int btran_send(btran_ctx_t* ctx, const uint8_t* buf, uint32_t size)
 {
     uint8_t nonce[8];
     fill_with_random(nonce, sizeof(nonce));
@@ -318,10 +318,16 @@ int btran_send(btran_ctx_t* ctx, uint8_t* buf, uint32_t size)
     if (send_all(ctx, (uint8_t*)&size_netendian, sizeof(size_netendian)) != 0)
         return 1;
 
-    if (s20_crypt(ctx->key_hash, S20_KEYLEN_256, nonce, 8, buf, size) !=
+    uint8_t* tmp = btran_malloc(size);
+    memcpy(tmp, buf, size);
+    if (s20_crypt(ctx->key_hash, S20_KEYLEN_256, nonce, 8, tmp, size) !=
         S20_SUCCESS)
         panic("encryption failed");
-    if (send_all(ctx, buf, size) != 0)
+    if (send_all(ctx, tmp, size) != 0) {
+        free(tmp);
         return 1;
+    }
+
+    free(tmp);
     return 0;
 }

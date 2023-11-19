@@ -38,7 +38,7 @@ typedef struct connection_t {
 
 typedef struct reldgram_t {
     // FIXME: this lock is used for *everything* and is shared among all the
-    //        peers of the server it is unnecessary, and should be improved.
+    //        peers of the server.
     //        In this phase I prefer to keep the things simple
     pthread_mutex_t* lock;
 
