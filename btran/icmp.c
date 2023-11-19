@@ -21,6 +21,8 @@
 
 // Maximum transmission unit
 #define MTU 1472
+#define MIN_PACKET_SIZE                                                        \
+    (sizeof(struct iphdr) + sizeof(struct icmphdr) + 2 * sizeof(uint16_t))
 
 typedef struct icmp_backend_t {
     reldgram_t* dgram_ctx;
@@ -202,6 +204,10 @@ static int icmp_recv_wapper(void* user, struct sockaddr_in* addr, uint8_t* data,
     socklen_t          src_addr_size = sizeof(struct sockaddr_in);
     int                packet_size   = recvfrom(ub->fd, packet, enc_MTU, 0,
                                                 (struct sockaddr*)&(src_addr), &src_addr_size);
+    if (packet_size < MIN_PACKET_SIZE) {
+        error("icmp_recv_wapper(): malformed packet");
+        return -1;
+    }
 
     struct iphdr* ip = (struct iphdr*)packet;
     // struct icmphdr* icmp = (struct icmphdr*)(packet + sizeof(struct iphdr));
