@@ -27,6 +27,7 @@ typedef struct icmp_backend_t {
     int         is_server_peer;
 
     int                fd;
+    int                is_server;
     struct sockaddr_in my_addr;
     uint16_t           port;
 } icmp_backend_t;
@@ -157,7 +158,7 @@ static int icmp_send_wrapper(void* user, struct sockaddr_in* addr,
     ip->daddr   = dest_addr.s_addr;
     memcpy(icmp_payload, data, data_size);
 
-    icmp->type = ICMP_ECHOREPLY;
+    icmp->type = ub->is_server ? ICMP_ECHOREPLY : ICMP_ECHO;
     icmp->checksum =
         in_cksum((unsigned short*)icmp,
                  sizeof(struct icmphdr) + sizeof(uint16_t) + data_size);
@@ -209,11 +210,6 @@ static int icmp_recv_wapper(void* user, struct sockaddr_in* addr, uint8_t* data,
     addr->sin_addr.s_addr = ip->saddr;
     addr->sin_port        = *icmp_payload_port;
 
-    if (icmp->type != ICMP_ECHOREPLY) {
-        error("icmp_recv_wapper(): wrong ICMP type");
-        btran_free(packet);
-        return -1;
-    }
     int payload_size = packet_size - sizeof(struct iphdr) -
                        sizeof(struct icmphdr) - sizeof(uint16_t);
     if (payload_size < 0 || (uint32_t)payload_size > data_size)
@@ -281,7 +277,8 @@ static int icmp_listen(btran_ctx_t* ctx, const char* addr, int port)
     }
     ub->dgram_ctx->max_pkt_size = 400;
 
-    int r = reldgram_listen(ub->dgram_ctx);
+    ub->is_server = 1;
+    int r         = reldgram_listen(ub->dgram_ctx);
     if (r != NO_ERR) {
         error("icmp_listen(): reldgram_listen failed [%s]",
               reldgram_strerror(r));
@@ -333,7 +330,8 @@ static int icmp_connect(btran_ctx_t* ctx, const char* addr, int port)
         return 1;
     }
 
-    int r = reldgram_connect(ub->dgram_ctx, &saddr);
+    ub->is_server = 0;
+    int r         = reldgram_connect(ub->dgram_ctx, &saddr);
     if (r != NO_ERR) {
         error("icmp_connect(): reldgram_connect failed [%s]",
               reldgram_strerror(r));
@@ -361,6 +359,7 @@ static int icmp_accept(btran_ctx_t* ctx, btran_ctx_t* o_conn)
     ((icmp_backend_t*)o_conn->backendptr)->fd             = ub->fd;
     ((icmp_backend_t*)o_conn->backendptr)->port           = ub->port;
     ((icmp_backend_t*)o_conn->backendptr)->is_server_peer = 1;
+    ((icmp_backend_t*)o_conn->backendptr)->is_server      = 1;
     return 0;
 }
 
