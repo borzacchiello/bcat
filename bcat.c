@@ -14,24 +14,28 @@ static struct option long_options[] = {
     {"protocol", required_argument, 0, 'P'},
     {"key", required_argument, 0, 'K'},
     {"keep", no_argument, 0, 'k'},
+    {"verbose", no_argument, 0, 'v'},
     {"help", no_argument, 0, 'h'},
     {0, 0, 0, 0} // Null termination required
 };
 
-static const char* key  = NULL;
-static int         keep = 0;
+static const char* key     = NULL;
+static int         keep    = 0;
+static int         verbose = 0;
 
 static void usage(const char* pname)
 {
-    fprintf(stderr,
-            "USAGE: %s [-l] [-P <protocol>] [-K <key>] [-h] <addr> <port>\n"
-            "\n"
-            "    -h: print help\n"
-            "    -l: listen mode\n"
-            "    -K: key, required if not in listen mode\n"
-            "    -P: backend protocol type [tcp, udp, icmp]\n"
-            "    -k: keep the connection alive\n",
-            pname);
+    fprintf(
+        stderr,
+        "USAGE: %s [-l] [-P <protocol>] [-K <key>] [-v] [-h] <addr> <port>\n"
+        "\n"
+        "    -h: print help\n"
+        "    -l: listen mode\n"
+        "    -K: key, required if not in listen mode\n"
+        "    -P: backend protocol type [tcp, udp, icmp]\n"
+        "    -k: keep the connection alive\n"
+        "    -v: verbose\n",
+        pname);
     exit(0);
 }
 
@@ -73,12 +77,21 @@ static int gen_key(char key[33])
 static _Atomic int thread_completed = 0;
 static void*       print_from_network_loop(void* _ctx)
 {
+    time_t   start          = time(NULL);
+    uint64_t total_received = 0;
+
     btran_ctx_t* ctx = (btran_ctx_t*)_ctx;
     while (1) {
         uint8_t* buf;
         uint32_t size;
         if (btran_recv(ctx, &buf, &size, 0) != 0)
             break;
+
+        total_received += size;
+        if (verbose && total_received % 1000 == 0)
+            fprintf(stderr, "[*] download speed: %.03lf KB/s\n",
+                    ((double)(total_received / 1000) /
+                     (double)(time(NULL) - start)));
 
         size_t nwrote = 0;
         while (nwrote != size)
@@ -210,7 +223,7 @@ int main(int argc, char* const* argv)
 
     int opt;
     int option_index = 0;
-    while ((opt = getopt_long(argc, argv, "lK:P:kh", long_options,
+    while ((opt = getopt_long(argc, argv, "lK:P:khv", long_options,
                               &option_index)) != -1) {
         switch (opt) {
             case 'l':
@@ -231,6 +244,9 @@ int main(int argc, char* const* argv)
                 break;
             case 'h':
                 usage(argv[0]);
+                break;
+            case 'v':
+                verbose = 1;
                 break;
             default:
                 fprintf(stderr, "[!] invalid option\n");

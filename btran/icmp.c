@@ -139,19 +139,26 @@ static int icmp_send_wrapper(void* user, struct sockaddr_in* addr,
     struct in_addr src_addr  = ub->my_addr.sin_addr;
     struct in_addr dest_addr = addr->sin_addr;
 
+    uint16_t src_port = htons(ub->port);
+    uint16_t dst_port = addr->sin_port;
+
     int packet_size = sizeof(struct iphdr) + sizeof(struct icmphdr) +
-                      sizeof(uint16_t) + data_size;
+                      2 * sizeof(uint16_t) + data_size;
     char* packet = btran_calloc(packet_size);
 
     struct iphdr*   ip   = (struct iphdr*)packet;
     struct icmphdr* icmp = (struct icmphdr*)(packet + sizeof(struct iphdr));
-    uint16_t*       icmp_payload_port =
+    uint16_t*       icmp_payload_src_port =
         (uint16_t*)(packet + sizeof(struct iphdr) + sizeof(struct icmphdr));
+    uint16_t* icmp_payload_dst_port =
+        (uint16_t*)(packet + sizeof(struct iphdr) + sizeof(struct icmphdr) +
+                    sizeof(uint16_t));
     char* icmp_payload = (char*)(packet + sizeof(struct iphdr) +
-                                 sizeof(struct icmphdr) + sizeof(uint16_t));
+                                 sizeof(struct icmphdr) + 2 * sizeof(uint16_t));
 
     prepare_headers(ip, icmp);
-    *icmp_payload_port = htons(ub->port);
+    *icmp_payload_src_port = src_port;
+    *icmp_payload_dst_port = dst_port;
 
     ip->tot_len = htons(packet_size);
     ip->saddr   = src_addr.s_addr;
@@ -161,7 +168,7 @@ static int icmp_send_wrapper(void* user, struct sockaddr_in* addr,
     icmp->type = ub->is_server ? ICMP_ECHOREPLY : ICMP_ECHO;
     icmp->checksum =
         in_cksum((unsigned short*)icmp,
-                 sizeof(struct icmphdr) + sizeof(uint16_t) + data_size);
+                 sizeof(struct icmphdr) + 2 * sizeof(uint16_t) + data_size);
 
     struct sockaddr_in servaddr;
     memset(&servaddr, 0, sizeof(struct sockaddr_in));
@@ -198,26 +205,32 @@ static int icmp_recv_wapper(void* user, struct sockaddr_in* addr, uint8_t* data,
 
     struct iphdr* ip = (struct iphdr*)packet;
     // struct icmphdr* icmp = (struct icmphdr*)(packet + sizeof(struct iphdr));
-    uint16_t* icmp_payload_port =
+    uint16_t* icmp_payload_src_port =
         (uint16_t*)(packet + sizeof(struct iphdr) + sizeof(struct icmphdr));
+    uint16_t* icmp_payload_dst_port =
+        (uint16_t*)(packet + sizeof(struct iphdr) + sizeof(struct icmphdr) +
+                    sizeof(uint16_t));
     char* icmp_payload = (char*)(packet + sizeof(struct iphdr) +
-                                 sizeof(struct icmphdr) + sizeof(uint16_t));
-    if (ntohs(*icmp_payload_port) == ub->port) {
+                                 sizeof(struct icmphdr) + 2 * sizeof(uint16_t));
+
+    debug("received packet with srcport: %u, dstport: %u, myport: %u",
+          ntohs(*icmp_payload_src_port), ntohs(*icmp_payload_dst_port),
+          ub->port);
+
+    if (ntohs(*icmp_payload_dst_port) != ub->port) {
         btran_free(packet);
         return -1;
     }
 
     addr->sin_addr.s_addr = ip->saddr;
-    addr->sin_port        = *icmp_payload_port;
+    addr->sin_port        = *icmp_payload_src_port;
 
     int payload_size = packet_size - sizeof(struct iphdr) -
-                       sizeof(struct icmphdr) - sizeof(uint16_t);
+                       sizeof(struct icmphdr) - 2 * sizeof(uint16_t);
     if (payload_size < 0 || (uint32_t)payload_size > data_size)
         panic("icmp_recv_wapper(): not enough space to hold the data "
               "[payload_size: %d, data_size: %u]",
               payload_size, data_size);
-    debug("icmp_recv_wapper(): received packet with size %u [port: %u]",
-          payload_size, ntohs(*icmp_payload_port));
     memcpy(data, icmp_payload, payload_size);
 
     free(packet);
